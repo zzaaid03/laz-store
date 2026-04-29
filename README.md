@@ -1,566 +1,113 @@
-# LAZ Store – Graduation Project Dossier (Android, Jetpack Compose)
-
-This document is a comprehensive, single-file reference for the LAZ Store Android app. It is structured as an academic dossier suitable for a graduation project: it includes an abstract, objectives, background, architecture (high- and low-level), sequence diagrams, implementation details with real code excerpts, development workflow, testing, security, and future work.
-
-
-## 1) Abstract
-LAZ Store is a role-based e-commerce application for Tesla parts built with Kotlin and Jetpack Compose. The app follows MVVM with unidirectional data flow, integrates Firebase (Auth, Realtime Database/Firestore, Storage, Remote Config), and provides Admin, Employee, and Customer experiences. This dossier documents the system architecture and key flows (shopping, cart, checkout, order history), shows implementation snippets, and explains build, testing, and security practices.
-
-
-## 2) Objectives
-- Provide a clean MVVM implementation using Kotlin + Jetpack Compose.
-- Deliver role-based UX for Admin, Employee, and Customer.
-- Persist and sync data via Firebase services with security rules.
-- Showcase modern Compose UI patterns and reusable components.
-- Offer maintainable architecture with clear separation of concerns.
-
-
-## 3) Project Structure (selected)
-```
-src/main/kotlin/com/laz/
-  FirebaseMainActivity.kt             # App entry, Compose host, VM wiring
-  models/
-    Product.kt                        # Domain model (id, name, qty, cost, price, imageUrl)
-    Order.kt                          # Order, OrderItem, OrderStatus; toMap() for Firebase
-    User.kt                           # User + UserRole (ADMIN, CUSTOMER, EMPLOYEE)
-    ... (CartItem.kt, Return.kt, SupportChat.kt, etc.)
-  ui/components/
-    FloatingCartSummary.kt            # Draggable, animated cart FAB with total
-    ProductImageDisplay.kt            # Image loader (Coil)
-  ui/screens/
-    CustomerShoppingScreen.kt         # Customer-only shopping/catalog
-    FirebaseEnhancedCartScreen.kt     # Cart/checkout
-    FirebaseOrderHistoryScreen.kt     # Order history listing
-    AdminDashboardScreen.kt           # Admin analytics
-    EmployeeProductManagementScreen.kt# Inventory management
-    ... (Login/Signup/Profile/Tracking/AI Chat, etc.)
-  viewmodels/
-    SecureFirebaseProductViewModel.kt # Product permissions + flows
-    SecureFirebaseCartViewModel.kt    # Cart flows + rules
-    FirebaseOrdersViewModel.kt        # Orders realtime & filters
-    FirebaseAuthViewModel.kt          # Auth + current user state
-    FirebaseViewModelFactory.kt       # DI-style factory (FirebaseServices)
-```
-
-
-## 4) High-Level Architecture
-The app uses a layered MVVM approach with unidirectional data flow.
-
-```mermaid
-flowchart LR
-  subgraph Presentation [Presentation (Jetpack Compose)]
-    Screens[Compose Screens] -->|observes StateFlow| VM[ViewModels]
-    Components[Reusable Components] --> Screens
-  end
-
-  subgraph Domain [Domain Models]
-    Product
-    Order
-    User
-  end
-
-  subgraph Data [Data / Repositories]
-    Repo[Firebase Repositories]
-  end
-
-  subgraph Services [Firebase Services]
-    Auth[Firebase Auth]
-    DB[Realtime DB/Firestore]
-    Storage[Firebase Storage]
-    RC[Remote Config]
-  end
-
-  VM --> Repo --> DB
-  VM --> Auth
-  VM --> Storage
-  VM --> RC
-  Screens --> Components
-  Domain <--> VM
-```
-
-Key principles:
-- ViewModels expose immutable UI state via StateFlow.
-- Screens observe state and send user intents to ViewModels.
-- Repositories handle Firebase CRUD and mapping to domain models.
-- Permission manager enforces role-based rules in ViewModels.
-
-
-## 5) Low-Level Architecture (Product & Cart)
-```mermaid
-graph TD
-  UI[CustomerShoppingScreen] -->|addToCart(productId, qty)| CartVM[SecureFirebaseCartViewModel]
-  UI -->|getCustomerProducts()| ProductVM[SecureFirebaseProductViewModel]
-  ProductVM --> RepoP[FirebaseProductRepository]
-  CartVM --> RepoC[FirebaseCartRepository]
-  RepoP --> DB[(Firebase DB)]
-  RepoC --> DB
-  CartVM --> Auth[FirebaseAuth]
-  ProductVM --> Auth
-  subgraph Security
-    Perm[PermissionManager]
-  end
-  ProductVM --> Perm
-  CartVM --> Perm
-```
-
-
-## 6) Core Sequence Diagrams
-
-### 6.1 Customer Shopping & Add-to-Cart
-```mermaid
-sequenceDiagram
-  autonumber
-  participant UI as CustomerShoppingScreen
-  participant PVM as SecureFirebaseProductViewModel
-  participant CVM as SecureFirebaseCartViewModel
-  participant Repo as Firebase Repositories
-  participant FB as Firebase (Auth/DB)
-
-  UI->>PVM: collect getCustomerProducts()
-  PVM->>Repo: getAllProducts()
-  Repo->>FB: query products (filter by stock)
-  FB-->>Repo: product list
-  Repo-->>PVM: products
-  PVM-->>UI: StateFlow<List<Product>>
-
-  UI->>CVM: addToCart(productId, quantity)
-  CVM->>Repo: create/update cart items
-  Repo->>FB: write cart changes
-  FB-->>Repo: ack
-  Repo-->>CVM: Result
-  CVM-->>UI: operationSuccess / errorMessage
-```
-
-### 6.2 Order History (Customer)
-```mermaid
-sequenceDiagram
-  autonumber
-  participant UI as FirebaseOrderHistoryScreen
-  participant OVM as FirebaseOrdersViewModel
-  participant Repo as Orders Repository
-  participant FB as Firebase DB
-
-  UI->>OVM: collect orders
-  OVM->>Repo: subscribe orders for current user
-  Repo->>FB: realtime listener (orders/{customerId})
-  FB-->>Repo: order snapshots
-  Repo-->>OVM: List<Order>
-  OVM-->>UI: StateFlow<List<Order>> (filtered to completed)
-  UI-->>UI: render LazyColumn of OrderHistoryItem
-```
-
-### 6.3 Authentication
-```mermaid
-sequenceDiagram
-  participant UI as Login/Signup Screens
-  participant AVM as FirebaseAuthViewModel
-  participant Auth as Firebase Auth
-
-  UI->>AVM: signIn(email,password) / signUp(...)
-  AVM->>Auth: signInWithEmailAndPassword / createUser
-  Auth-->>AVM: auth result (uid, tokens)
-  AVM-->>UI: currentUser StateFlow
-```
-
-
-## 7) Domain Models (code excerpts)
-
-`src/main/kotlin/com/laz/models/Product.kt`:
-```kotlin
-@Entity(tableName = "products")
-data class Product(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    @ColumnInfo(name = "name") val name: String,
-    @ColumnInfo(name = "quantity") val quantity: Int,
-    @ColumnInfo(name = "cost") val cost: BigDecimal,
-    @ColumnInfo(name = "price") val price: BigDecimal,
-    @ColumnInfo(name = "shelf_location") val shelfLocation: String? = null,
-    @ColumnInfo(name = "image_url") val imageUrl: String? = null
-)
-```
-
-`src/main/kotlin/com/laz/models/Order.kt`:
-```kotlin
-data class Order(
-    val id: Long = 0,
-    val customerId: Long,
-    val customerUsername: String,
-    val items: List<OrderItem>,
-    val totalAmount: BigDecimal,
-    val status: OrderStatus,
-    val paymentMethod: String,
-    val shippingAddress: String,
-    val orderDate: Long = System.currentTimeMillis(),
-    val estimatedDelivery: Long? = null,
-    val trackingNumber: String? = null,
-    val notes: String? = null
-)
-```
-
-`src/main/kotlin/com/laz/models/User.kt`:
-```kotlin
-@Entity(tableName = "users")
-data class User(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    @ColumnInfo(name = "username") val username: String,
-    @ColumnInfo(name = "password") val password: String,
-    @ColumnInfo(name = "role") val role: UserRole,
-    @ColumnInfo(name = "email") val email: String? = null,
-    @ColumnInfo(name = "phone_number") val phoneNumber: String? = null,
-    @ColumnInfo(name = "address") val address: String? = null,
-    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
-)
-```
-
-
-## 8) Entry Point and UI Composition (excerpt)
-
-`src/main/kotlin/com/laz/FirebaseMainActivity.kt`:
-```kotlin
-class FirebaseMainActivity : ComponentActivity() {
-  override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
-    setContent {
-      LazTheme {
-        val authViewModel: FirebaseAuthViewModel = viewModel(
-          factory = FirebaseServices.secureViewModelFactory
-        )
-        val defaultUser = User(
-          id = 1L, username = "admin", password = "admin123",
-          role = UserRole.ADMIN, email = "admin@laz.com"
-        )
-        FirebaseLazStoreApp(user = defaultUser, authViewModel = authViewModel)
-      }
-    }
-  }
-}
-```
-
-
-## 9) ViewModels and Permissions (excerpt)
-
-`src/main/kotlin/com/laz/viewmodels/SecureFirebaseProductViewModel.kt`:
-```kotlin
-class SecureFirebaseProductViewModel(
-  private val productRepository: FirebaseProductRepository,
-  private val currentUser: StateFlow<User?>
-) : ViewModel() {
-  private val _products = MutableStateFlow<List<Product>>(emptyList())
-  val products: StateFlow<List<Product>> = _products.asStateFlow()
-  private val _permissionError = MutableStateFlow<String?>(null)
-  val permissionError: StateFlow<String?> = _permissionError.asStateFlow()
-
-  fun loadProducts() {
-    val user = currentUser.value
-    if (!PermissionManager.canViewProducts(user)) {
-      _permissionError.value = "Access denied: You don't have permission to view products"
-      return
-    }
-    viewModelScope.launch {
-      val result = productRepository.getAllProducts()
-      if (result.isSuccess) _products.value = result.getOrNull() ?: emptyList()
-      else {/* set error */}
-    }
-  }
-
-  fun getCustomerProducts(): StateFlow<List<Product>> =
-    if (PermissionManager.isCustomer(currentUser.value))
-      products.map { it.filter { p -> p.quantity > 0 } }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
-    else products
-}
-```
-
-
-## 10) Key Screens and Components (excerpts)
-
-`src/main/kotlin/com/laz/ui/screens/CustomerShoppingScreen.kt`:
-```kotlin
-@Composable
-fun CustomerShoppingScreen(
-  productViewModel: SecureFirebaseProductViewModel,
-  cartViewModel: SecureFirebaseCartViewModel,
-  onNavigateToCart: () -> Unit,
-  onNavigateBack: () -> Unit
-) {
-  val products by productViewModel.getCustomerProducts().collectAsState()
-  val cartItemCount by cartViewModel.cartItemCount.collectAsState()
-  val cartTotal by cartViewModel.cartTotal.collectAsState()
-  // ... UI with LazyColumn of CustomerProductCard and FloatingCartSummary
-}
-```
-
-`src/main/kotlin/com/laz/ui/components/FloatingCartSummary.kt`:
-```kotlin
-@Composable
-fun FloatingCartSummary(
-  cartItemCount: Int,
-  cartTotal: BigDecimal,
-  isVisible: Boolean = true,
-  onCartClick: () -> Unit,
-  modifier: Modifier = Modifier
-) {
-  AnimatedVisibility(visible = isVisible && cartItemCount > 0) {
-    Box(modifier = Modifier
-      .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
-      .pointerInput(Unit) { detectDragGestures { change, drag -> /* update pos */ } }
-    ) { /* Card with badge and total */ }
-  }
-}
-```
-
-`src/main/kotlin/com/laz/ui/screens/FirebaseOrderHistoryScreen.kt`:
-```kotlin
-@Composable
-fun FirebaseOrderHistoryScreen(
-  currentUser: User,
-  onNavigateBack: () -> Unit,
-  ordersViewModel: FirebaseOrdersViewModel = viewModel(factory = FirebaseServices.secureViewModelFactory)
-) {
-  val orders by ordersViewModel.orders.collectAsState()
-  // Filter to current user's completed orders and render LazyColumn
-}
-```
-
-
-## 11) Data Flow and State Management
-- StateFlows in ViewModels provide reactive UI state.
-- Compose screens subscribe using `collectAsState()`.
-- Unidirectional flow: UI events -> ViewModel intents -> Repository I/O -> new state.
-- Error and permission messages are tracked as `StateFlow<String?>` and rendered as banners/cards.
-
-
-## 12) Firebase Integration
-- Auth: FirebaseAuth manages login/signup and current user session.
-- Database: Realtime Database/Firestore stores products, carts, orders.
-- Storage: Product images and user uploads.
-- Remote Config: Feature flags and thresholds (e.g., low-stock limit).
-- Mapping: `Order.toMap()` converts to Firebase document-friendly structure.
-
-
-## 13) Security & Roles
-- Roles: `UserRole` = ADMIN, EMPLOYEE, CUSTOMER.
-- Permission checks centralized in `PermissionManager` and enforced in ViewModels (e.g., `canAddProducts`, `canManageInventory`, `isCustomer`).
-- UI gating: admin/employee-only actions hidden/disabled for customers.
-- Firebase Rules: validate document paths by `auth.uid` and allowed operations per role.
-
-
-## 14) Build, Run, and Config
-- Android SDK: 34; Kotlin: 1.9.x; JDK: 17.
-- Firebase setup: place `google-services.json` under app module; enable Auth, DB, Storage as needed.
-- Gradle: use Firebase BoM to align versions; enable Compose.
-- Run: select `FirebaseMainActivity` launch; device/emulator API 26+.
-
-
-## 15) Testing & Quality
-- Unit tests for ViewModels (business logic, permission checks).
-- UI tests with Compose testing APIs for screen flows.
-- Lint/ktlint and Detekt recommended for static analysis.
-- Optional CI: GitHub Actions with Gradle build + test matrix.
-
-
-## 16) Troubleshooting
-- If products list is empty on first run, `SecureFirebaseProductViewModel` can seed sample products via `createSampleProductsForSetup()`.
-- Check internet/Firebase configuration if Realtime listeners don’t update.
-- Verify Firebase Rules and authenticated user role for permission errors.
-
-
-## 17) Future Work
-- Payment gateway integration.
-- Push notifications for order status changes.
-- Enhanced analytics dashboards and A/B tests via Remote Config.
-- Offline cache with Room and paging.
-
-
-## 18) References (in-repo)
-- `src/main/kotlin/com/laz/FirebaseMainActivity.kt`
-- `src/main/kotlin/com/laz/models/*`
-- `src/main/kotlin/com/laz/ui/components/FloatingCartSummary.kt`
-- `src/main/kotlin/com/laz/ui/screens/CustomerShoppingScreen.kt`
-- `src/main/kotlin/com/laz/ui/screens/FirebaseOrderHistoryScreen.kt`
-- `src/main/kotlin/com/laz/viewmodels/*`
-
-This dossier consolidates the architecture, design, and implementation details of LAZ Store for academic review and future maintenance.
-
-
-## 19) Permission Model (Policy Matrix)
-
-- __ADMIN__
-  - Products: Full CRUD, inventory adjustments.
-  - Orders: Full lifecycle management (confirm, ship, deliver, cancel, return).
-  - Users: Manage employees/customers where applicable.
-  - Analytics: View dashboards and KPIs.
-- __EMPLOYEE__
-  - Products: View inventory; limited actions as allowed by policy (no destructive CRUD).
-  - Orders: Update permissible statuses (e.g., processing, shipped, delivered) based on assignment.
-  - Analytics: Restricted/summary view if enabled.
-- __CUSTOMER__
-  - Catalog: Browse in-stock products only.
-  - Cart/Checkout: Add/remove/update quantities, place orders.
-  - Orders: View own order history and tracking.
-
-Enforcement: Centralized permission checks within ViewModels (e.g., `PermissionManager.canViewProducts`, `isCustomer`), and UI gating to hide/disable disallowed actions.
-
-
-## 20) Data Layer Overview (Repositories & Services)
-
-- __Repositories__: Abstract Firebase I/O for products, cart, orders, users.
-  - Responsibilities: CRUD, realtime listeners, mapping to domain models, error handling.
-- __ViewModel Factory__: `FirebaseServices.secureViewModelFactory` provides ViewModels with repository and `currentUser` wiring.
-- __Realtime Mapping__: Orders utilize a `toMap()` pattern for Firebase serialization and consistent deserialization.
-- __State__: ViewModels expose `StateFlow` for UI; repositories emit domain-safe results.
-
-
-## 21) Critical Business Rules (Implemented)
-
-- __Stock restoration on Returns/Cancellations__: When order status transitions to RETURNED or CANCELLED, product stock is restored accordingly (repository + ViewModel coordination).
-- __Completed orders analytics__: Dashboard metrics count only SHIPPED/DELIVERED orders; CANCELLED/RETURNED excluded from revenue and totals.
-- __Cart safeguards__:
-  - Quantity zero auto-removal: If quantity drops to 0, item is removed from cart.
-  - Five-minute stock hold: Items added to cart hold stock for 5 minutes with periodic cleanup and an option to extend.
-- __Currency standardization__: All UI currency displays use JOD consistently.
-
-
-## 22) Additional Screens and Modules (Overview)
-
-- __AdminDashboardScreen__: KPIs, totals, recent activity; observes orders and analytics flows.
-- __EmployeeProductManagementScreen__: Inventory browsing; role-gated actions with permission-aware UI and errors.
-- __FirebaseReturnsProcessingScreen__: Process returns with clear success/error feedback and JOD formatting.
-- __Payment/Checkout Screens__: Capture payment selection and show professional receipt dialog upon success.
-- __Order Tracking / History__: Separate views for active tracking and completed history (delivered/returned/cancelled).
-- __Support Chat / AI Assistant__: Customer support conversations persisted in Firebase with indexed rules.
-- __Auth (Login/Signup/Profile)__: Firebase-backed authentication and profile management.
-
-
-## 23) Firebase Rules and Config
-
-- __Database Rules File__: `database.rules.json` (update in Firebase Console to match).
-- __Support Collections (example rules snippet)__:
-```json
-"support_chats": {
-  ".indexOn": ["customerId", "customerName", "timestamp", "isActive"],
-  ".read": true,
-  ".write": true
-},
-"support_messages": {
-  ".indexOn": ["chatId", "senderId", "timestamp", "isFromCustomer"],
-  ".read": true,
-  ".write": true
-}
-```
-- __Remote Config__: Use for feature flags (e.g., low-stock threshold) if enabled.
-- __Storage__: Host product images; validate paths and MIME types via rules.
-
-
-## 24) Build Stability and Environment Notes
-
-- __Android Gradle Plugin__: 8.2.2 (stable)
-- __Gradle Wrapper__: 8.2 (compatible)
-- __Kotlin__: 1.9.x; __JDK__: 17; __Android SDK__: 34
-- __Firebase BoM__: align dependencies via platform BoM (e.g., 31.x series)
-- __Testing Config__: `testOptions { unitTests { isIncludeAndroidResources = true } }`
-- __Run Target__: API 26+ emulator/device; ensure `google-services.json` present.
-
+<p align="center">
+  <img src="laz_logo.png" alt="LAZ Store" width="120">
+</p>
+
+<h1 align="center">LAZ Store</h1>
+<p align="center">Tesla aftermarket parts e-commerce app for Android.</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Kotlin-7F52FF?logo=kotlin&logoColor=white" alt="Kotlin">
+  <img src="https://img.shields.io/badge/Jetpack%20Compose-4285F4?logo=jetpackcompose&logoColor=white" alt="Jetpack Compose">
+  <img src="https://img.shields.io/badge/Firebase-DD2C00?logo=firebase&logoColor=white" alt="Firebase">
+  <img src="https://img.shields.io/badge/Material%203-757575?logo=materialdesign&logoColor=white" alt="Material 3">
+</p>
 
 ---
 
-This document is final and suitable for supervisor submission. It covers architecture, flows, security, repositories, critical business rules, environment, and references with real code excerpts.
+<!-- TODO: Screenshots. Drop PNGs into a /screenshots folder and uncomment the block below.
+<p align="center">
+  <img src="screenshots/home.png" width="200" alt="Home">
+  <img src="screenshots/ai-chat.png" width="200" alt="AI Chat">
+  <img src="screenshots/cart.png" width="200" alt="Cart">
+  <img src="screenshots/admin-dashboard.png" width="200" alt="Admin Dashboard">
+</p>
+-->
 
+## What it is
 
-## 25) Extra Diagrams
+LAZ Store is a production Android app for buying and selling Tesla aftermarket parts. Customers browse the catalog, identify unknown parts by uploading photos to an AI chat (powered by Claude and GPT-4), and check out with a cart that syncs across devices in real time. Admins and employees manage inventory, process orders and returns, and view sales analytics through dedicated role-based interfaces. The entire app is bilingual (Arabic/English).
 
-### 25.1 Repository / Data Flow Overview
-```mermaid
-flowchart LR
-  subgraph UI[Compose UI]
-    Screen1[CustomerShoppingScreen]
-    Screen2[AdminDashboardScreen]
-    Screen3[OrderHistoryScreen]
-  end
+## Features
 
-  subgraph VM[ViewModels]
-    PVM[SecureFirebaseProductViewModel]
-    CVM[SecureFirebaseCartViewModel]
-    OVM[FirebaseOrdersViewModel]
-    AVM[FirebaseAuthViewModel]
-  end
+**AI parts identification**
+Upload a photo of any Tesla part. The app sends it to Claude or GPT-4 via OpenRouter for image analysis, then returns part matches, compatibility details, and pricing. Supports follow-up questions in a full chat interface.
 
-  subgraph Repo[Repositories]
-    ProdRepo[FirebaseProductRepository]
-    CartRepo[FirebaseCartRepository]
-    OrderRepo[FirebaseOrdersRepository]
-    UserRepo[FirebaseUserRepository]
-  end
+**Three role-based interfaces**
+Admin: dashboard with KPIs, full CRUD on products, complete order lifecycle management.
+Employee: inventory browsing, order status updates, limited analytics.
+Customer: catalog filtered to in-stock items, cart, checkout, order tracking and history.
 
-  subgraph FB[Firebase Services]
-    Auth[Auth]
-    RDB[Realtime DB/Firestore]
-    Store[Storage]
-    RC[Remote Config]
-  end
+**Real-time cart sync**
+Cart state is backed by Firebase Realtime Database listeners. Add something on your phone, see it on your tablet instantly. Stock is held for 5 minutes per cart item with automatic cleanup.
 
-  Screen1 -->|collect StateFlow| PVM
-  Screen1 --> CVM
-  Screen2 --> OVM
-  Screen3 --> OVM
-  Screen1 --> AVM
+**Push notifications**
+TypeScript Cloud Functions watch for order status changes and trigger FCM push notifications to the relevant user.
 
-  PVM --> ProdRepo --> RDB
-  CVM --> CartRepo --> RDB
-  OVM --> OrderRepo --> RDB
-  AVM --> Auth
+**Bilingual UI**
+Full Arabic and English support throughout the app.
 
-  PVM --> Auth
-  CVM --> Auth
-  OVM --> Auth
-  PVM --> RC
-  PVM --> Store
+**Order lifecycle**
+Order tracking, returns processing with automatic stock restoration, history with status filtering. Currency displayed in JOD.
+
+## Tech stack
+
+| Layer | Technologies |
+|-------|-------------|
+| **Mobile** | Kotlin, Jetpack Compose, Material 3, Coil (image loading) |
+| **Backend** | Firebase Auth, Realtime Database, Storage, Remote Config, Cloud Functions (TypeScript), FCM |
+| **AI** | OpenRouter API, Claude, GPT-4, image analysis, conversational chat |
+| **Architecture** | MVVM, StateFlow, Kotlin Coroutines, unidirectional data flow |
+
+## Architecture
+
+ViewModels expose immutable UI state via `StateFlow`. Compose screens subscribe with `collectAsState()` and send user intents back to ViewModels, keeping data flow strictly unidirectional. A centralized `PermissionManager` enforces role-based access at the ViewModel layer, so UI components never reason about authorization directly. Firebase Realtime Database listeners push updates through repositories into ViewModels, meaning the catalog, cart, and order screens all update live without polling.
+
+For a detailed architecture walkthrough with diagrams, sequence flows, code excerpts, and the full permission model, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+<!-- TODO: Drop a 30-second demo GIF or screen recording here.
+## Demo
+<p align="center">
+  <img src="screenshots/demo.gif" width="300" alt="Demo">
+</p>
+-->
+
+## Run locally
+
+1. **Clone the repo**
+   ```bash
+   git clone https://github.com/zzaaid03/laz-store.git
+   ```
+
+2. **Firebase setup**
+   Create a Firebase project with Auth, Realtime Database, and Storage enabled. Download `google-services.json` and place it in the project root. The file is in `.gitignore`.
+
+3. **OpenRouter API key**
+   Add your key to `local.properties`:
+   ```properties
+   OPENROUTER_API_KEY=your_key_here
+   ```
+
+4. **Deploy Cloud Functions** (push notifications)
+   ```bash
+   cd functions && npm install && firebase deploy --only functions
+   ```
+
+5. **Build and run**
+   Open in Android Studio, sync Gradle, run on a device or emulator running API 26+.
+
+## Project structure
+
+```
+src/main/kotlin/com/laz/
+  FirebaseMainActivity.kt           # App entry point
+  models/                           # Domain models (Product, Order, User, Cart, etc.)
+  ui/screens/                       # Compose screens per role and feature
+  ui/components/                    # Reusable Compose components
+  viewmodels/                       # MVVM ViewModels with StateFlow
+  repositories/                     # Firebase data access layer
+functions/                          # TypeScript Cloud Functions (FCM notifications)
 ```
 
-### 25.2 Returns Workflow & Stock Restoration
-```mermaid
-sequenceDiagram
-  autonumber
-  participant Admin as Admin/Employee UI
-  participant OVM as FirebaseOrdersViewModel
-  participant ORepo as FirebaseOrdersRepository
-  participant PRepo as FirebaseProductRepository
-  participant DB as Firebase DB
+---
 
-  Admin->>OVM: updateOrderStatus(orderId, RETURNED/CANCELLED)
-  OVM->>ORepo: request status update
-  ORepo->>DB: write status change
-  DB-->>ORepo: ack
-  ORepo->>ORepo: if status in {RETURNED, CANCELLED}
-  ORepo->>PRepo: restoreStockForOrder(order)
-  PRepo->>DB: increment product.quantity by returned amounts
-  DB-->>PRepo: ack
-  PRepo-->>ORepo: success/failure
-  ORepo-->>OVM: emit updated order + side-effects result
-  OVM-->>Admin: success dialog / error banner
-```
-
-### 25.3 Role Permissions Overview (Simple)
-```mermaid
-flowchart TB
-  ADMIN[ADMIN] --> ProductsCRUD[Products: CRUD + Inventory]
-  ADMIN --> OrdersFull[Orders: Full Lifecycle]
-  ADMIN --> UsersManage[Users: Manage]
-  ADMIN --> AnalyticsView[Analytics: Full]
-
-  EMPLOYEE[EMPLOYEE] --> ProductsView[Products: View]
-  EMPLOYEE --> OrdersUpdate[Orders: Update Allowed Statuses]
-  EMPLOYEE --> AnalyticsLite[Analytics: Limited]
-
-  CUSTOMER[CUSTOMER] --> BrowseCatalog[Catalog: Browse In-Stock]
-  CUSTOMER --> CartCheckout[Cart: Add/Update/Checkout]
-  CUSTOMER --> ViewOrders[Orders: Own History/Tracking]
-
-  classDef admin fill:#1f77b4,stroke:#0d3b66,stroke-width:1,color:#fff;
-  classDef employee fill:#2ca02c,stroke:#145214,stroke-width:1,color:#fff;
-  classDef customer fill:#ff7f0e,stroke:#a34a00,stroke-width:1,color:#fff;
-
-  class ADMIN admin;
-  class EMPLOYEE employee;
-  class CUSTOMER customer;
-```
+Solo project, active development. Built as a student business by [@zzaaid03](https://github.com/zzaaid03).
